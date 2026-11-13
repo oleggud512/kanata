@@ -112,6 +112,14 @@ struct Pad {
 fn translate(event: EventType, pad: &mut Pad) -> Option<PadInput> {
     Some(match event {
         EventType::ButtonPressed(button, code) | EventType::ButtonReleased(button, code) => {
+            // Triggers are handled via ButtonChanged (analog and digital triggers both emit
+            // ButtonChanged in gilrs). Gilrs also synthesizes ButtonPressed/ButtonReleased
+            // at a fixed 0.75/0.65 threshold for analog triggers, which bypasses kanata's
+            // configured trigger threshold and debounce, and leaves the button permanently
+            // pressed if state updates are disabled.
+            if trigger_side(button).is_some() {
+                return None;
+            }
             let pressed = matches!(event, EventType::ButtonPressed(..));
             match classify(button) {
                 Control::Button(button) => PadInput::Button { button, pressed },
@@ -313,7 +321,6 @@ fn run(engine: Arc<Mutex<PadEngine>>, tx: SyncSender<KeyEvent>) -> Result<(), St
     // top of ours. The projector is built to be exact, so it wants raw values.
     let mut gilrs = GilrsBuilder::new()
         .with_default_filters(false)
-        .set_update_state(false)
         .build()
         .map_err(|e| format!("could not start a controller backend: {e}"))?;
 
@@ -609,6 +616,64 @@ mod tests {
         assert_eq!(
             events.iter().map(|e| (e.code, e.value)).collect::<Vec<_>>(),
             vec![(south, KeyValue::Press), (south, KeyValue::Release)]
+        );
+    }
+
+    #[test]
+    fn trigger_press_and_release_emits_press_and_release_events() {
+        let pad = PadDeviceId::new(0);
+        let l2 = PadCode::button(PadButton::L2).os_code();
+        let events = dispatch_trace(
+            GamepadConfig::default(),
+            &[l2],
+            &[
+                (pad, EventType::Connected),
+                (
+                    pad,
+                    EventType::ButtonChanged(Button::LeftTrigger2, 0.5, code()),
+                ),
+                (pad, EventType::ButtonPressed(Button::LeftTrigger2, code())),
+                (
+                    pad,
+                    EventType::ButtonChanged(Button::LeftTrigger2, 1.0, code()),
+                ),
+                (
+                    pad,
+                    EventType::ButtonChanged(Button::LeftTrigger2, 0.0, code()),
+                ),
+            ],
+        );
+        assert_eq!(
+            events.iter().map(|e| (e.code, e.value)).collect::<Vec<_>>(),
+            vec![(l2, KeyValue::Press), (l2, KeyValue::Release)]
+        );
+    }
+
+    #[test]
+    fn trigger_respects_configured_threshold() {
+        let pad = PadDeviceId::new(0);
+        let l2 = PadCode::button(PadButton::L2).os_code();
+        let mut config = GamepadConfig::default();
+        config.trigger_mut(Side::Left).threshold = Unit::new(0.85);
+        let events = dispatch_trace(
+            config,
+            &[l2],
+            &[
+                (pad, EventType::Connected),
+                (
+                    pad,
+                    EventType::ButtonChanged(Button::LeftTrigger2, 0.8, code()),
+                ),
+                (pad, EventType::ButtonPressed(Button::LeftTrigger2, code())),
+                (
+                    pad,
+                    EventType::ButtonChanged(Button::LeftTrigger2, 0.0, code()),
+                ),
+            ],
+        );
+        assert_eq!(
+            events.iter().map(|e| (e.code, e.value)).collect::<Vec<_>>(),
+            vec![]
         );
     }
 }
